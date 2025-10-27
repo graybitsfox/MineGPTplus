@@ -2,22 +2,31 @@ require('dotenv').config();
 const Bot = require('./Bot');
 const { GoalNear } = require('mineflayer-pathfinder').goals;
 
-const CHEST_POSITION = { x: 10, y: 64, z: 10 }; // Hardcoded chest position for simplicity
-
 class Lumberjack extends Bot {
     constructor() {
         super('Lumberjack');
+        this.sharedChestLocation = null;
         this.taskQueue = ['gather_wood', 'deposit_wood'];
         this.busy = false;
     }
 
     onSpawn() {
-        this.log("Ready to chop wood.");
-        this.startMainLoop();
+        this.log("Spawned. Waiting for shared chest location...");
+    }
+
+    handleMessage(data) {
+        if (data.event === 'shared_chest_created') {
+            this.log(`Received shared chest location: ${JSON.stringify(data.location)}`);
+            this.sharedChestLocation = data.location;
+            // Once the chest location is known, start the main work loop.
+            this.startMainLoop();
+        }
     }
 
     startMainLoop() {
-        setInterval(() => {
+        if (this.mainLoopInterval) return; // Ensure loop is only started once
+        this.log("Chest location known. Starting main work loop.");
+        this.mainLoopInterval = setInterval(() => {
             if (!this.busy) {
                 this.runNextTask();
             }
@@ -46,8 +55,8 @@ class Lumberjack extends Bot {
             this.log(`Task ${task} completed.`);
         } catch (error) {
             this.log(`Task ${task} failed: ${error}`);
-            this.taskQueue.unshift(task); // Re-queue failed task
-            await this.bot.waitForTicks(100); // Wait 5 seconds before retrying
+            this.taskQueue.unshift(task);
+            await this.bot.waitForTicks(100);
         }
         this.busy = false;
     }
@@ -57,34 +66,22 @@ class Lumberjack extends Bot {
         const targetBlock = this.bot.findBlock({ matching: logIds, maxDistance: 64 });
         if (!targetBlock) throw new Error("No wood found nearby.");
 
-        this.log(`Found wood. Going to it.`);
         await this.bot.pathfinder.goto(new GoalNear(targetBlock.position.x, targetBlock.position.y, targetBlock.position.z, 1));
 
-        this.log(`Mining ${count} logs.`);
         for (let i = 0; i < count; i++) {
             const nextLog = this.bot.findBlock({ matching: logIds, maxDistance: 3 });
-            if (nextLog) {
-                await this.bot.dig(nextLog);
-                this.log(`Mined a log. (${i + 1}/${count})`);
-            } else {
-                break;
-            }
+            if (nextLog) await this.bot.dig(nextLog);
         }
     }
 
     async depositItemsInChest() {
-        await this.bot.pathfinder.goto(new GoalNear(CHEST_POSITION.x, CHEST_POSITION.y, CHEST_POSITION.z, 2));
+        if (!this.sharedChestLocation) throw new Error("Chest location is unknown.");
 
-        const chestBlock = this.bot.blockAt(this.bot.entity.position.offset(CHEST_POSITION.x, CHEST_POSITION.y, CHEST_POSITION.z));
+        await this.bot.pathfinder.goto(new GoalNear(this.sharedChestLocation.x, this.sharedChestLocation.y, this.sharedChestLocation.z, 2));
+
+        const chestBlock = this.bot.blockAt(this.sharedChestLocation);
         if (!chestBlock || !chestBlock.name.includes('chest')) {
-            // For simplicity, we just place a chest if it's not there.
-            // In a real scenario, the Lumberjack might need to craft one.
-            const chestItem = this.bot.inventory.items().find(item => item.name.includes('chest'));
-            if(chestItem) await this.bot.placeBlock(this.bot.blockAt(this.bot.entity.position.offset(1,0,0)), {x:0, y:1, z:0});
-            else {
-                this.log("No chest nearby, and I can't make one. Skipping deposit.");
-                return;
-            }
+            throw new Error("Chest not found at the received location.");
         }
 
         const chest = await this.bot.openChest(chestBlock);
