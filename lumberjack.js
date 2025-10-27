@@ -4,64 +4,45 @@ const { GoalNear } = require('mineflayer-pathfinder').goals;
 
 class Lumberjack extends Bot {
     constructor() {
-        super('Lumberjack');
-        this.sharedChestLocation = null;
-        this.taskQueue = ['gather_wood', 'deposit_wood'];
+        super('Lumberjack', 'Lumberjack');
         this.busy = false;
     }
 
     onSpawn() {
-        this.log("Spawned. Waiting for shared chest location...");
-    }
-
-    handleMessage(data) {
-        if (data.event === 'shared_chest_created') {
-            this.log(`Received shared chest location: ${JSON.stringify(data.location)}`);
-            this.sharedChestLocation = data.location;
-            // Once the chest location is known, start the main work loop.
-            this.startMainLoop();
-        }
+        this.log("Ready to chop wood. Starting main loop.");
+        this.startMainLoop();
     }
 
     startMainLoop() {
-        if (this.mainLoopInterval) return; // Ensure loop is only started once
-        this.log("Chest location known. Starting main work loop.");
+        if (this.mainLoopInterval) return;
         this.mainLoopInterval = setInterval(() => {
             if (!this.busy) {
-                this.runNextTask();
+                this.workCycle();
             }
-        }, 1000);
+        }, 5000); // Start a cycle every 5 seconds if not busy
     }
 
-    async runNextTask() {
-        if (this.taskQueue.length === 0) {
-            this.taskQueue.push('gather_wood', 'deposit_wood'); // Loop tasks
-        }
-
-        const task = this.taskQueue.shift();
-        this.log(`Starting task: ${task}`);
+    async workCycle() {
         this.busy = true;
-
         try {
-            switch (task) {
-                case 'gather_wood':
-                    await this.getWood(5);
-                    break;
-                case 'deposit_wood':
-                    await this.depositItemsInChest();
-                    this.sendMessage({ event: 'wood_deposited' });
-                    break;
+            this.log("Starting new work cycle.");
+            const woodGathered = await this.getWood(5);
+            if (woodGathered > 0) {
+                const dropLocation = await this.findDropLocation();
+                await this.dropItemsAt(dropLocation);
+                this.sendMessage({ event: 'wood_dropped', location: dropLocation, quantity: woodGathered });
+            } else {
+                this.log("Didn't gather any wood, skipping drop.");
             }
-            this.log(`Task ${task} completed.`);
         } catch (error) {
-            this.log(`Task ${task} failed: ${error}`);
-            this.taskQueue.unshift(task);
-            await this.bot.waitForTicks(100);
+            this.log(`Work cycle failed: ${error}`);
         }
         this.busy = false;
     }
 
     async getWood(count) {
+        const initialWoodCount = this.bot.inventory.items().find(item => this.LOG_NAMES.includes(item.name))?.count || 0;
+
         const logIds = this.LOG_NAMES.map(name => this.mcData.blocksByName[name].id);
         const targetBlock = this.bot.findBlock({ matching: logIds, maxDistance: 64 });
         if (!targetBlock) throw new Error("No wood found nearby.");
@@ -71,28 +52,29 @@ class Lumberjack extends Bot {
         for (let i = 0; i < count; i++) {
             const nextLog = this.bot.findBlock({ matching: logIds, maxDistance: 3 });
             if (nextLog) await this.bot.dig(nextLog);
+            else break;
         }
+        const finalWoodCount = this.bot.inventory.items().find(item => this.LOG_NAMES.includes(item.name))?.count || 0;
+        return finalWoodCount - initialWoodCount;
     }
 
-    async depositItemsInChest() {
-        if (!this.sharedChestLocation) throw new Error("Chest location is unknown.");
+    async findDropLocation() {
+        const referenceBlock = this.bot.blockAt(this.bot.entity.position.offset(0, -1, 0));
+        const dropPosition = await this.bot.findPlaceablePosition(referenceBlock.position, 4);
+        if (!dropPosition) throw new Error("Could not find a clear spot to drop items.");
+        return dropPosition.offset(0,1,0); // The space above the solid block
+    }
 
-        await this.bot.pathfinder.goto(new GoalNear(this.sharedChestLocation.x, this.sharedChestLocation.y, this.sharedChestLocation.z, 2));
+    async dropItemsAt(location) {
+        await this.bot.pathfinder.goto(new GoalNear(location.x, location.y, location.z, 2));
 
-        const chestBlock = this.bot.blockAt(this.sharedChestLocation);
-        if (!chestBlock || !chestBlock.name.includes('chest')) {
-            throw new Error("Chest not found at the received location.");
+        const itemsToDrop = this.bot.inventory.items().filter(item => this.LOG_NAMES.includes(item.name));
+        if (itemsToDrop.length === 0) return;
+
+        for (const item of itemsToDrop) {
+            await this.bot.tossStack(item);
         }
-
-        const chest = await this.bot.openChest(chestBlock);
-        this.log("Opened chest. Depositing logs.");
-
-        for (const item of this.bot.inventory.items()) {
-            if (this.LOG_NAMES.includes(item.name)) {
-                await chest.deposit(item.type, null, item.count);
-            }
-        }
-        await chest.close();
+        this.log(`Dropped logs at ${location.x}, ${location.y}, ${location.z}`);
     }
 }
 

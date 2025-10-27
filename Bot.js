@@ -4,8 +4,9 @@ const { loader: autoeatLoader } = require('mineflayer-auto-eat')
 const WebSocket = require('ws');
 
 class Bot {
-    constructor(username) {
+    constructor(username, role) {
         this.username = username;
+        this.role = role;
         this.host = process.env.MINEGPT_HOST || 'localhost';
         this.port = parseInt(process.env.MINEGPT_PORT) || 25565;
         this.version = process.env.MINEGPT_VERSION || '1.18.2';
@@ -14,12 +15,13 @@ class Bot {
         this.bot = null;
         this.mcData = null;
         this.ws = null;
+        this.busy = false;
 
-        this.LOG_NAMES = []; // Will be populated after spawn
+        this.LOG_NAMES = ['oak_log', 'birch_log', 'spruce_log', 'dark_oak_log', 'acacia_log', 'jungle_log'];
     }
 
     log(message) {
-        console.log(`[${this.username}] ${message}`);
+        console.log(`[${this.username} | ${this.role}] ${message}`);
     }
 
     start() {
@@ -49,24 +51,30 @@ class Bot {
 
     connectToMessageBus() {
         this.ws = new WebSocket('ws://localhost:8080');
-        this.ws.on('open', () => this.log("Connected to Message Bus."));
+        this.ws.on('open', () => {
+            this.log("Connected to Message Bus.");
+            this.announceReadiness();
+        });
         this.ws.on('message', message => this.handleMessage(JSON.parse(message.toString())));
         this.ws.on('close', () => {
             this.log("Disconnected from Message Bus. Reconnecting...");
             setTimeout(() => this.connectToMessageBus(), 5000);
         });
-        this.ws.on('error', () => { /* Ignore errors, handled by close */ });
+        this.ws.on('error', () => {});
     }
 
     sendMessage(data) {
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            this.ws.send(JSON.stringify(data));
+            this.ws.send(JSON.stringify({ ...data, from: this.username, role: this.role }));
         }
     }
 
+    announceReadiness() {
+        this.sendMessage({ event: 'ready_for_task' });
+    }
+
     handleMessage(data) {
-        // This method will be overridden by subclasses (e.g., Carpenter)
-        this.log(`Received message: ${JSON.stringify(data)}`);
+        // This will be implemented by subclasses
     }
 
     addEventListeners() {
@@ -85,23 +93,17 @@ class Bot {
         this.bot.once('spawn', () => {
             this.log("Bot spawned.");
             this.mcData = require('minecraft-data')(this.bot.version);
-            this.LOG_NAMES = ['oak_log', 'birch_log', 'spruce_log', 'dark_oak_log', 'acacia_log', 'jungle_log'];
 
-            this.bot.autoEat.options = {
-                priority: 'foodPoints',
-                startAt: 18,
-                bannedFood: []
-            };
-
-            // Allow subclasses to define their own spawn behavior
+            // **THE FIX IS HERE:** Call the onSpawn method that subclasses will implement.
             this.onSpawn();
         });
     }
 
-    // This will be implemented by subclasses
+    // This method is intended to be overridden by subclasses
     onSpawn() {
         this.log("Ready for tasks.");
+        this.announceReadiness();
     }
 }
 
-module.exports = Bot; // Export the class
+module.exports = Bot;
