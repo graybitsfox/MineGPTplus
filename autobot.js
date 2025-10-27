@@ -7,7 +7,7 @@
 require('dotenv').config();
 const mineflayer = require('mineflayer')
 const { pathfinder, Movements, goals: { GoalNear } } = require('mineflayer-pathfinder')
-const autoeat = require('mineflayer-auto-eat').plugin
+const { loader: autoeatLoader } = require('mineflayer-auto-eat')
 
 // Log a message to the console
 function log(message){
@@ -53,7 +53,7 @@ createBot()
 
 // Load plugins
 bot.loadPlugin(pathfinder)
-bot.loadPlugin(autoeat)
+bot.loadPlugin(autoeatLoader)
 
 // --- Constants and Bot State ---
 let mcData;
