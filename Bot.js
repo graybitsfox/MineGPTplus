@@ -31,9 +31,10 @@ class Bot {
         this.candidates = new Set();
         this.votes = {};
         this.hasVoted = false;
-        this.villageChestPosition = null;
-        this.villageInventory = {};
-        this.villageGoals = { furnace: 4, oak_log: 32 };
+    this.villageChestPosition = null;
+    this.villageInventory = {};
+    // Use a generic 'log' goal so any wood log type satisfies the requirement
+    this.villageGoals = { furnace: 4, log: 32 };
         this.tasks = [];
         this.currentTask = null;
         this.is_searching = false;
@@ -50,10 +51,21 @@ class Bot {
             password: this.password, auth: this.auth, logErrors: true, respawn: true,
             viewDistance: 'far', disableChatSigning: true
         });
-
+        // If the underlying minecraft-protocol client's keepalive timeout is too short,
+        // increase it after the client is created. Default observed timeout is 30000 ms.
+        const desiredKeepAlive = parseInt(process.env.MINEGPT_KEEPALIVE_MS) || 60000;
         this.bot.once('spawn', () => {
             this.log("Successfully connected and spawned.");
             this.mcData = require('minecraft-data')(this.bot.version);
+            // Try to increase keepalive timeout on the low-level client if available
+            try {
+                if (this.bot._client && typeof this.bot._client.keepAliveTimeout !== 'undefined') {
+                    this.bot._client.keepAliveTimeout = desiredKeepAlive;
+                    this.log(`Set underlying keepAliveTimeout to ${desiredKeepAlive}ms`);
+                }
+            } catch (e) {
+                this.log(`Could not set keepAliveTimeout: ${e.message}`);
+            }
             this.loadPlugins();
             this.addEventListeners();
             this.connectToMessageBus();
@@ -61,8 +73,14 @@ class Bot {
 
         this.bot.on('error', (err) => {
              this.log(`Connection error: ${err}.`);
+             // Handle keepalive/timeouts gracefully with an increased delay
+             const isTimeout = err && err.message && err.message.toLowerCase().includes('timed out');
+             if (isTimeout) {
+                 this.log('Detected keepalive timeout; will retry with longer delay.');
+             }
              if (retryCount < MAX_RETRIES - 1) {
-                setTimeout(() => this.start(retryCount + 1), RETRY_DELAY);
+                const delay = isTimeout ? RETRY_DELAY * 2 : RETRY_DELAY;
+                setTimeout(() => this.start(retryCount + 1), delay);
              } else {
                  this.log(`All connection attempts failed. Stopping.`);
              }
@@ -85,8 +103,12 @@ class Bot {
         this.ws = new WebSocket('ws://localhost:8080');
         this.ws.on('open', () => {
             this.log("Connected to Message Bus.");
-            // Now that we are connected to the bus, we can safely start the election
-            this.startElection();
+            // Start election only if we don't already know the elder
+            if (!this.elder) {
+                this.startElection();
+            } else {
+                this.log(`Already know elder: ${this.elder} — skipping election.`);
+            }
         });
         this.ws.on('message', message => this.handleMessage(JSON.parse(message.toString())));
         this.ws.on('close', () => setTimeout(() => this.connectToMessageBus(), 5000));
@@ -162,6 +184,13 @@ class Bot {
     }
 
     startElection() {
+        // If we already have an elder, don't run another election
+        if (this.elder) {
+            this.log(`Elder already assigned (${this.elder}), skipping election.`);
+            this.state = BOT_STATES.WORKER_IDLE;
+            return;
+        }
+
         this.state = BOT_STATES.CANDIDATE;
         this.candidates = new Set([this.username]);
         this.votes = {};
@@ -220,7 +249,7 @@ class Bot {
     async establishVillageCenter() {
         if (this.is_searching) return;
         try {
-            await this.gatherItem('oak_log', 12);
+            await this.gatherItem('log', 12);
             await this.craftPlanks();
             const chestPosition = this.bot.entity.position.floored().offset(2, 0, 0);
             this.villageChestPosition = chestPosition;
@@ -232,28 +261,44 @@ class Bot {
             this.sendMessage({ event: 'village_chest_location', position: chestPosition });
             this.log("Village center established successfully!");
         } catch (err) {
-            this.log(`Could not establish village: ${err.message}. Starting search for a better location.`);
+            this.log(`Could not establish village: ${err.message}. Trying to find nearby wood.`);
+            // Instead of searching for a biome, try to find oak_log blocks nearby and move there
             this.is_searching = true;
-            const forestLocation = await this.findBiome('forest');
-            if (forestLocation) {
-                await this.bot.pathfinder.goto(new GoalNear(forestLocation.x, forestLocation.y, forestLocation.z, 4));
-                this.is_searching = false;
-                await this.establishVillageCenter();
-            } else {
-                this.log("Could not find a suitable forest biome. The Elder is giving up.");
+            try {
+                    const logs = this.bot.findBlocks({ matching: (b) => b && b.name === 'oak_log', maxDistance: 100, count: 12 });
+                if (logs && logs.length > 0) {
+                    // Move to the first found log and try again
+                    const target = logs[0];
+                    await this.bot.pathfinder.goto(new GoalNear(target.x, target.y, target.z, 3));
+                    this.is_searching = false;
+                    await this.establishVillageCenter();
+                    return;
+                }
+                this.log("No oak_log found nearby. The Elder is giving up.");
+            } catch (searchErr) {
+                this.log(`Error while searching for wood: ${searchErr.message}`);
+            } finally {
                 this.is_searching = false;
             }
         }
     }
 
     async craftPlanks() {
-        const logItem = this.mcData.itemsByName.oak_log;
-        const logCount = this.bot.inventory.count(logItem.id, null);
-        if (logCount > 0) {
-            const plankItem = this.mcData.itemsByName.oak_planks;
-            const recipe = this.bot.recipesFor(plankItem.id, null, 1, null)[0];
-            if (!recipe) throw new Error("Could not find recipe for planks.");
-            await this.bot.craft(recipe, logCount, null);
+        // Find any log type in inventory and craft corresponding planks.
+        const plankItem = this.mcData.itemsByName.oak_planks;
+        if (!plankItem) return;
+        const recipes = this.bot.recipesFor(plankItem.id, null, 1, null) || [];
+        // Try to find a log in inventory that matches one of the recipes
+        for (const recipe of recipes) {
+            // recipe.delta has negative ids for ingredients
+            const ingredient = recipe.delta.find(d => d.count < 0);
+            if (!ingredient) continue;
+            const ingredientId = -ingredient.id;
+            const logCount = this.bot.inventory.count(ingredientId, null);
+            if (logCount > 0) {
+                await this.bot.craft(recipe, logCount, null);
+                return;
+            }
         }
     }
 
@@ -353,7 +398,12 @@ class Bot {
     }
 
     async gatherItem(name, count) {
-        const blocks = this.bot.findBlocks({ matching: (b) => b.name === name, maxDistance: 64, count });
+        const matching = (b) => {
+            if (!b) return false;
+            if (name === 'log') return b.name && b.name.includes('log');
+            return b.name === name;
+        };
+        const blocks = this.bot.findBlocks({ matching, maxDistance: 64, count });
         if (blocks.length < count) throw new Error(`Not enough ${name} nearby.`);
         for (let i = 0; i < count; i++) {
             await this.bot.pathfinder.goto(new GoalNear(blocks[i].x, blocks[i].y, blocks[i].z, 1));
@@ -411,10 +461,12 @@ class Bot {
         this.log(`Searching for a ${name} biome...`);
         const options = {
             matching: (block) => {
+                if (!block || !block.position) return false;
+                if (!this.bot.world || typeof this.bot.world.getBiome !== 'function') return false;
                 const biome = this.bot.world.getBiome(block.position);
-                return biome && biome.name.includes(name);
+                return biome && biome.name && biome.name.includes(name);
             },
-            maxDistance: 256,
+            maxDistance: 100,
             count: 1,
         };
         const block = await this.bot.findBlock(options);
