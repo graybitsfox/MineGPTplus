@@ -4,12 +4,13 @@ console.log("Starting Minecraft server...");
 
 const server = createMCServer({
   port: 25565,
-  version: '1.18.2', // A version compatible with mineflayer
-  'online-mode': false, // Important for local testing without authentication
+  version: '1.18.2',
+  'online-mode': false,
   motd: 'AutoBot Test Server',
   'max-players': 10,
   logging: true,
-  plugins: {} // Add this empty object to fix the error
+  'view-distance': 10, // Default is 10, let's try increasing it to see if it helps
+  plugins: {}
 })
 
 server.on('listening', () => {
