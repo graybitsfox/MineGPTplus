@@ -1,60 +1,28 @@
-const { spawn } = require('child_process');
-const path = require('path');
+require('dotenv').config(); // Load .env file variables
 const Bot = require('./Bot');
 
-const BOT_NAMES = ['Alice', 'Bob', 'Charlie', 'David'];
-const SERVER_STARTUP_TIME = 8000; // Increased to 8 seconds for more stability
+// --- Single Bot Launch for Connection Testing ---
 
-let childProcesses = [];
+// For offline mode, the username from .env will be used.
+// If .env specifies a password (online mode), this name is just for logging.
+const BOT_NAME_FOR_TESTING = process.env.MINEGPT_USERNAME || 'TestBot';
 
-// Helper function to spawn and manage a child process
-function runScript(scriptPath, name) {
-    const fullPath = path.join(__dirname, scriptPath);
-    const process = spawn('node', [fullPath]);
+console.log(`--- Starting a single bot [${BOT_NAME_FOR_TESTING}] for connection testing ---`);
+console.log(`Target Server: ${process.env.MINEGPT_HOST}:${process.env.MINEGPT_PORT}`);
+console.log(`Version: ${process.env.MINEGPT_VERSION}`);
+console.log(`Auth Mode: ${process.env.MINEGPT_PASSWORD ? 'Microsoft (Online)' : 'Offline'}`);
 
-    process.stdout.on('data', (data) => {
-        console.log(`[${name} STDOUT]: ${data.toString().trim()}`);
-    });
+const bot = new Bot(BOT_NAME_FOR_TESTING);
+bot.start();
 
-    process.stderr.on('data', (data) => {
-        console.error(`[${name} STDERR]: ${data.toString().trim()}`);
-    });
+// Keep the process alive to see logs
+process.stdin.resume();
 
-    process.on('close', (code) => {
-        console.log(`[${name}]: Child process exited with code ${code}`);
-    });
-
-    childProcesses.push(process);
-    return process;
-}
-
-// 1. Start the servers
-console.log("--- Starting Servers ---");
-runScript('message_bus.js', 'MessageBus');
-runScript('server.js', 'MinecraftServer');
-
-// 2. Start the bots after a delay
-console.log(`--- Waiting ${SERVER_STARTUP_TIME / 1000} seconds for servers to initialize ---`);
-setTimeout(() => {
-    console.log("--- Starting Bots ---");
-    BOT_NAMES.forEach((name, i) => {
-        setTimeout(() => {
-            console.log(`Starting bot: ${name}`);
-            const bot = new Bot(name);
-            bot.start();
-        }, i * 2000); // Stagger bot startups
-    });
-}, SERVER_STARTUP_TIME);
-
-
-// Graceful shutdown
 function cleanup() {
-    console.log("\n--- Shutting down all processes ---");
-    childProcesses.forEach(proc => {
-        proc.kill();
-    });
+    console.log("\n--- Shutting down bot ---");
+    // You can add bot disconnect logic here if needed in the future
     process.exit();
 }
 
-process.on('SIGINT', cleanup); // Catches Ctrl+C
+process.on('SIGINT', cleanup);
 process.on('SIGTERM', cleanup);

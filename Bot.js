@@ -1,3 +1,4 @@
+require('dotenv').config(); // Load .env file variables
 const mineflayer = require('mineflayer')
 const { pathfinder, Movements, goals: { GoalNear } } = require('mineflayer-pathfinder')
 const { loader: autoeatLoader } = require('mineflayer-auto-eat')
@@ -20,12 +21,18 @@ const RETRY_DELAY = 3000;
 const INVENTORY_CHECK_INTERVAL = 20000;
 
 class Bot {
-    constructor(username) {
-        this.username = username;
-        this.host = process.env.MINEGPT_HOST || 'localhost';
-        this.port = parseInt(process.env.MINEGPT_PORT) || 25565;
-        this.version = process.env.MINEGPT_VERSION || '1.18.2';
-        this.password = process.env.MINEGPT_PASSWORD;
+    constructor(botName) {
+        // --- All connection parameters are now loaded from .env ---
+        this.host = process.env.MINEGPT_HOST;
+        this.port = parseInt(process.env.MINEGPT_PORT);
+        this.version = process.env.MINEGPT_VERSION;
+
+        // Use the botName for offline mode, or the email for online mode
+        this.username = process.env.MINEGPT_PASSWORD ? process.env.MINEGPT_USERNAME : botName;
+        this.password = process.env.MINEGPT_PASSWORD || null; // Use password or null for offline
+        this.auth = this.password ? 'microsoft' : 'offline';
+
+        // Internal properties
         this.bot = null;
         this.mcData = null;
         this.ws = null;
@@ -42,15 +49,23 @@ class Bot {
     }
 
     log(message) {
+        // Use the original bot name for logging, even in online mode
         console.log(`[${this.username} | ${this.state}] ${message}`);
     }
 
     start(retryCount = 0) {
-        this.log(`Attempting to connect (try ${retryCount + 1}/${MAX_RETRIES})...`);
+        this.log(`Attempting to connect to ${this.host}:${this.port} (try ${retryCount + 1}/${MAX_RETRIES})...`);
         this.bot = mineflayer.createBot({
-            host: this.host, port: this.port, version: this.version, username: this.username,
-            password: this.password, auth: this.password ? 'microsoft' : 'offline',
-            logErrors: false, respawn: true, viewDistance: 'far', disableChatSigning: true
+            host: this.host,
+            port: this.port,
+            version: this.version,
+            username: this.username,
+            password: this.password,
+            auth: this.auth,
+            logErrors: true, // Enable detailed errors
+            respawn: true,
+            viewDistance: 'far',
+            disableChatSigning: true
         });
 
         this.bot.once('spawn', () => {
@@ -63,11 +78,12 @@ class Bot {
         });
 
         this.bot.on('error', (err) => {
-            if (err.code === 'ECONNREFUSED' && retryCount < MAX_RETRIES - 1) {
+             this.log(`Connection error: ${err}.`);
+             if (retryCount < MAX_RETRIES - 1) {
                 setTimeout(() => this.start(retryCount + 1), RETRY_DELAY);
-            } else {
-                this.log(`Unhandled error: ${err}. Stopping.`);
-            }
+             } else {
+                 this.log(`All connection attempts failed. Stopping.`);
+             }
         });
 
         this.bot.on('end', (reason) => {
@@ -76,6 +92,7 @@ class Bot {
         });
     }
 
+    // ... (The rest of the file is identical to the last fully-functional version)
     loadPlugins() {
         this.bot.loadPlugin(pathfinder);
         this.bot.loadPlugin(autoeatLoader);
