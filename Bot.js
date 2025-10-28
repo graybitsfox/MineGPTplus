@@ -17,6 +17,7 @@ const ELECTION_TIMEOUT = 5000;
 const VOTE_TIMEOUT = 5000;
 const MAX_RETRIES = 5;
 const RETRY_DELAY = 3000;
+const INVENTORY_CHECK_INTERVAL = 20000;
 
 class Bot {
     constructor(username) {
@@ -25,18 +26,17 @@ class Bot {
         this.port = parseInt(process.env.MINEGPT_PORT) || 25565;
         this.version = process.env.MINEGPT_VERSION || '1.18.2';
         this.password = process.env.MINEGPT_PASSWORD;
-
         this.bot = null;
         this.mcData = null;
         this.ws = null;
-
         this.state = BOT_STATES.INIT;
         this.elder = null;
         this.candidates = new Set();
         this.votes = {};
         this.hasVoted = false;
-
         this.villageChestPosition = null;
+        this.villageInventory = {};
+        this.villageGoals = { furnace: 4, oak_log: 32 };
         this.tasks = [];
         this.currentTask = null;
     }
@@ -47,32 +47,23 @@ class Bot {
 
     start(retryCount = 0) {
         this.log(`Attempting to connect (try ${retryCount + 1}/${MAX_RETRIES})...`);
-
-        const botOptions = {
-            host: this.host,
-            port: this.port,
-            version: this.version,
-            username: this.username,
-            password: this.password,
-            auth: this.password ? 'microsoft' : 'offline',
-            logErrors: false,
-            respawn: true,
-            viewDistance: 'far',
-            disableChatSigning: true
-        };
-
-        this.bot = mineflayer.createBot(botOptions);
+        this.bot = mineflayer.createBot({
+            host: this.host, port: this.port, version: this.version, username: this.username,
+            password: this.password, auth: this.password ? 'microsoft' : 'offline',
+            logErrors: false, respawn: true, viewDistance: 'far', disableChatSigning: true
+        });
 
         this.bot.once('spawn', () => {
             this.log("Successfully connected and spawned.");
+            this.mcData = require('minecraft-data')(this.bot.version);
             this.loadPlugins();
             this.addEventListeners();
             this.connectToMessageBus();
+            this.startElection();
         });
 
         this.bot.on('error', (err) => {
             if (err.code === 'ECONNREFUSED' && retryCount < MAX_RETRIES - 1) {
-                this.log(`Connection refused. Retrying in ${RETRY_DELAY / 1000} seconds...`);
                 setTimeout(() => this.start(retryCount + 1), RETRY_DELAY);
             } else {
                 this.log(`Unhandled error: ${err}. Stopping.`);
@@ -88,24 +79,17 @@ class Bot {
     loadPlugins() {
         this.bot.loadPlugin(pathfinder);
         this.bot.loadPlugin(autoeatLoader);
+        const defaultMove = new Movements(this.bot, this.mcData);
+        this.bot.pathfinder.setMovements(defaultMove);
     }
 
     connectToMessageBus() {
         this.ws = new WebSocket('ws://localhost:8080');
         this.ws.on('open', () => this.log("Connected to Message Bus."));
         this.ws.on('message', message => this.handleMessage(JSON.parse(message.toString())));
-        this.ws.on('close', () => {
-            this.log("Disconnected from Message Bus. Reconnecting...");
-            setTimeout(() => this.connectToMessageBus(), 5000);
-        });
+        this.ws.on('close', () => setTimeout(() => this.connectToMessageBus(), 5000));
         this.ws.on('error', () => {});
     }
-
-    // ... rest of the file is the same as before ...
-    // sendMessage, handleMessage, addEventListeners (without spawn), etc.
-    // ...
-    // Note: I will need to remove the 'spawn' listener from addEventListeners
-    // as it's now handled in the start() method.
 
     sendMessage(data) {
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
@@ -114,7 +98,6 @@ class Bot {
     }
 
     handleMessage(data) {
-        // --- Election Logic ---
         if (data.event === 'declare_candidate' && this.state === BOT_STATES.CANDIDATE) this.candidates.add(data.from);
         if (data.event === 'cast_vote' && this.state === BOT_STATES.VOTING) {
             if (!this.votes[data.vote]) this.votes[data.vote] = [];
@@ -127,54 +110,35 @@ class Bot {
             this.onRoleAssigned();
         }
         if (data.event === 'restart_election') {
-            this.log("Received signal to restart election due to a tie.");
-            // Add a small random delay to prevent all bots starting at the exact same time
             setTimeout(() => this.startElection(), Math.random() * 1000);
         }
-
-        // --- Elder Task Management ---
         if (this.state === BOT_STATES.ELDER) {
             if (data.event === 'task_accept') {
                 const task = this.tasks.find(t => t.id === data.taskId);
-                if (task && !task.assignedTo) {
-                    task.assignedTo = data.from;
-                    this.log(`Task ${task.id} assigned to ${data.from}.`);
-                    this.announceTasks();
-                }
+                if (task && !task.assignedTo) task.assignedTo = data.from;
+                this.announceTasks();
             }
             if (data.event === 'task_complete') {
                 this.tasks = this.tasks.filter(t => t.id !== data.taskId);
-                this.log(`Task ${data.taskId} completed by ${data.from}. Remaining tasks: ${this.tasks.length}`);
+                this.checkVillageInventory();
             }
              if (data.event === 'task_fail') {
                 const task = this.tasks.find(t => t.id === data.taskId);
                 if (task) task.assignedTo = null;
-                this.log(`Task ${data.taskId} failed by ${data.from}. Re-releasing.`);
                 this.announceTasks();
             }
         }
-
-        // --- Worker Task Handling ---
         if (this.state === BOT_STATES.WORKER_IDLE) {
-            if (data.event === 'village_chest_location') {
-                this.villageChestPosition = data.position;
-                this.log(`Village chest location confirmed: ${JSON.stringify(this.villageChestPosition)}`);
-            }
+            if (data.event === 'village_chest_location') this.villageChestPosition = data.position;
             if (data.event === 'task_announcement' && !this.currentTask) {
                 const availableTask = data.tasks.find(t => !t.assignedTo);
-                if (availableTask) {
-                    this.acceptTask(availableTask);
-                }
+                if (availableTask) this.acceptTask(availableTask);
             }
         }
     }
 
     addEventListeners() {
         this.bot.on('kicked', (reason) => this.log(`Kicked for ${reason}!`));
-        this.mcData = require('minecraft-data')(this.bot.version);
-        const defaultMove = new Movements(this.bot, this.mcData);
-        this.bot.pathfinder.setMovements(defaultMove);
-        this.startElection();
     }
 
     startElection() {
@@ -193,9 +157,7 @@ class Bot {
     castVote() {
         if (this.hasVoted) return;
         const otherCandidates = Array.from(this.candidates).filter(c => c !== this.username);
-        const voteFor = otherCandidates.length > 0
-            ? otherCandidates[Math.floor(Math.random() * otherCandidates.length)]
-            : this.username;
+        const voteFor = otherCandidates.length > 0 ? otherCandidates[Math.floor(Math.random() * otherCandidates.length)] : this.username;
         this.sendMessage({ event: 'cast_vote', vote: voteFor });
         this.hasVoted = true;
     }
@@ -204,11 +166,9 @@ class Bot {
         if (this.state !== BOT_STATES.VOTING) return;
         const clerk = Array.from(this.candidates).sort()[0];
         if (this.username !== clerk) return;
-
         let winningCandidate = null;
         let maxVotes = -1;
         let isTie = false;
-
         for (const candidate in this.votes) {
             const voteCount = this.votes[candidate].length;
             if (voteCount > maxVotes) {
@@ -219,35 +179,29 @@ class Bot {
                 isTie = true;
             }
         }
-
         if (isTie || maxVotes <= 0) {
-            this.log("Tie detected or no votes! Restarting election.");
-            setTimeout(() => this.sendMessage({ event: 'restart_election' }), 1000);
-            return;
+            this.sendMessage({ event: 'restart_election' });
+        } else {
+            this.sendMessage({ event: 'election_result', elder: winningCandidate });
         }
-
-        this.sendMessage({ event: 'election_result', elder: winningCandidate });
     }
 
     onRoleAssigned() {
         if (this.state === BOT_STATES.ELDER) {
-            this.log("I am the Elder. I will establish the village and manage tasks.");
             this.establishVillageCenter().then(() => {
-                this.createNewTask('gather', { itemName: 'oak_log', count: 16 });
-                this.announceTasks();
-                setInterval(() => this.announceTasks(), 10000);
+                this.checkVillageInventory();
+                setInterval(() => this.checkVillageInventory(), INVENTORY_CHECK_INTERVAL);
             });
-        } else if (this.state === BOT_STATES.WORKER_IDLE) {
-            this.log("I am a Worker. Awaiting village location and tasks.");
         }
     }
 
     async establishVillageCenter() {
         try {
             const chestPosition = this.bot.entity.position.floored().offset(2, 0, 0);
+            this.villageChestPosition = chestPosition;
+            const tablePos = this.bot.entity.position.floored().offset(0, 0, 2);
             await this.gatherItem('oak_log', 3);
             await this.craftItem('crafting_table', 1);
-            const tablePos = this.bot.entity.position.floored().offset(0, 0, 2);
             await this.placeItem('crafting_table', tablePos);
             await this.gatherItem('oak_log', 8);
             await this.craftItem('chest', 1, tablePos);
@@ -258,39 +212,79 @@ class Bot {
         }
     }
 
-    async gatherItem(name, count) {
-        const item = this.mcData.itemsByName[name];
-        const blocks = this.bot.findBlocks({
-            matching: (block) => block.name === name,
-            maxDistance: 64,
-            count: count
-        });
-        if (blocks.length < count) throw new Error(`Not enough ${name} nearby.`);
-        for (let i = 0; i < count; i++) {
-            await this.bot.pathfinder.goto(new GoalNear(blocks[i].x, blocks[i].y, blocks[i].z, 1));
-            await this.bot.dig(this.bot.blockAt(blocks[i]));
+    async checkVillageInventory() {
+        if (!this.villageChestPosition) return;
+        try {
+            await this.bot.pathfinder.goto(new GoalNear(this.villageChestPosition.x, this.villageChestPosition.y, this.villageChestPosition.z, 2));
+            const chestBlock = this.bot.blockAt(this.villageChestPosition);
+            if (!chestBlock || chestBlock.name !== 'chest') return;
+            const chest = await this.bot.openChest(chestBlock);
+            const summary = {};
+            for (const item of chest.items()) {
+                summary[item.name] = (summary[item.name] || 0) + item.count;
+            }
+            await chest.close();
+            this.villageInventory = summary;
+            this.evaluateGoals();
+        } catch (err) {
+            this.log(`Error during inventory check: ${err.message}`);
         }
     }
 
-    async craftItem(name, count, tablePos = null) {
-        const item = this.mcData.itemsByName[name];
-        let craftingTable = tablePos ? this.bot.blockAt(tablePos) : null;
-        const recipe = this.bot.recipesFor(item.id, null, 1, craftingTable)[0];
-        if (!recipe) throw new Error(`No recipe for ${name}`);
-        await this.bot.craft(recipe, count, craftingTable);
+    evaluateGoals() {
+        for (const itemName in this.villageGoals) {
+            const requiredAmount = this.villageGoals[itemName];
+            const currentAmount = this.villageInventory[itemName] || 0;
+            const neededAmount = requiredAmount - currentAmount;
+            if (neededAmount <= 0) continue;
+            const existingTask = this.tasks.some(task => task.goal === itemName);
+            if (existingTask) continue;
+            const item = this.mcData.itemsByName[itemName];
+            const recipes = this.bot.recipesFor(item.id, null, 1, null);
+            if (recipes && recipes.length > 0) {
+                const recipe = recipes[0];
+                let canCraft = true;
+                for (const ingredient of recipe.delta) {
+                    if (ingredient.count > 0) continue;
+                    const ingredientName = this.mcData.items[-ingredient.id].name;
+                    const requiredIngredientCount = -ingredient.count * neededAmount;
+                    const currentIngredientCount = this.villageInventory[ingredientName] || 0;
+                    if (currentIngredientCount < requiredIngredientCount) {
+                        canCraft = false;
+                        const neededIngredientAmount = requiredIngredientCount - currentIngredientCount;
+                        this.evaluateSubGoal(ingredientName, neededIngredientAmount, itemName);
+                        break;
+                    }
+                }
+                if (canCraft) {
+                    this.createNewTask('craft', { itemName, count: neededAmount }, itemName);
+                }
+            } else {
+                this.createNewTask('gather', { itemName, count: neededAmount }, itemName);
+            }
+        }
+        this.announceTasks();
     }
 
-    async placeItem(name, position) {
-        const item = this.mcData.itemsByName[name];
-        const referenceBlock = this.bot.blockAt(position.offset(0, -1, 0));
-        await this.bot.equip(item.id, 'hand');
-        await this.bot.placeBlock(referenceBlock, { x: 0, y: 1, z: 0 });
+    evaluateSubGoal(itemName, neededAmount, ultimateGoal) {
+         const existingTask = this.tasks.some(task => task.details.itemName === itemName);
+         if (!existingTask) {
+            this.createNewTask('gather', { itemName, count: neededAmount }, ultimateGoal);
+         }
+    }
+
+    createNewTask(type, details, goal) {
+        const task = { id: uuidv4(), type, details, assignedTo: null, goal };
+        this.tasks.push(task);
+    }
+
+    announceTasks() {
+        this.sendMessage({ event: 'task_announcement', tasks: this.tasks });
     }
 
     acceptTask(task) {
         this.state = BOT_STATES.WORKER_BUSY;
         this.currentTask = task;
-        this.log(`Accepting task: ${task.id}`);
         this.sendMessage({ event: 'task_accept', taskId: task.id });
         this.executeTask();
     }
@@ -301,11 +295,11 @@ class Bot {
             if (type === 'gather') {
                 await this.gatherItem(details.itemName, details.count);
                 await this.depositItems(details.itemName, details.count);
+            } else if (type === 'craft') {
+                await this.craftAndDepositItem(details.itemName, details.count);
             }
-            this.log(`Task ${this.currentTask.id} finished.`);
             this.sendMessage({ event: 'task_complete', taskId: this.currentTask.id });
         } catch (err) {
-            this.log(`Error executing task: ${err.message}. Re-releasing task.`);
             this.sendMessage({ event: 'task_fail', taskId: this.currentTask.id });
         } finally {
             this.currentTask = null;
@@ -313,16 +307,58 @@ class Bot {
         }
     }
 
+    async gatherItem(name, count) {
+        const blocks = this.bot.findBlocks({ matching: (b) => b.name === name, maxDistance: 64, count });
+        if (blocks.length < count) throw new Error(`Not enough ${name} nearby.`);
+        for (let i = 0; i < count; i++) {
+            await this.bot.pathfinder.goto(new GoalNear(blocks[i].x, blocks[i].y, blocks[i].z, 1));
+            await this.bot.dig(this.bot.blockAt(blocks[i]));
+        }
+    }
+
     async depositItems(name, count) {
-        if (!this.villageChestPosition) throw new Error("I don't know where the village chest is.");
-        const chestPos = this.villageChestPosition;
-        await this.bot.pathfinder.goto(new GoalNear(chestPos.x, chestPos.y, chestPos.z, 2));
-        const chestBlock = this.bot.blockAt(chestPos);
-        const chest = await this.bot.openChest(chestBlock);
-        const itemToDeposit = this.mcData.itemsByName[name];
-        await chest.deposit(itemToDeposit.id, null, count);
+        await this.goToChest();
+        const chest = await this.bot.openChest(this.bot.blockAt(this.villageChestPosition));
+        const item = this.mcData.itemsByName[name];
+        await chest.deposit(item.id, null, count);
         await chest.close();
-        this.log(`Deposited ${count}x ${name} into the village chest.`);
+    }
+
+    async craftAndDepositItem(name, count) {
+        const item = this.mcData.itemsByName[name];
+        const recipe = this.bot.recipesFor(item.id, null, 1, null)[0];
+        await this.goToChest();
+        let chest = await this.bot.openChest(this.bot.blockAt(this.villageChestPosition));
+        for (const ing of recipe.delta) {
+            if (ing.count > 0) continue;
+            await chest.withdraw(-ing.id, null, -ing.count * count);
+        }
+        await chest.close();
+        const table = this.bot.findBlock({ matching: this.mcData.blocksByName.crafting_table.id, maxDistance: 16 });
+        await this.bot.pathfinder.goto(new GoalNear(table.position.x, table.position.y, table.position.z, 2));
+        await this.bot.craft(recipe, count, table);
+        await this.goToChest();
+        chest = await this.bot.openChest(this.bot.blockAt(this.villageChestPosition));
+        await chest.deposit(item.id, null, count);
+        await chest.close();
+    }
+
+    async placeItem(name, position) {
+        const item = this.mcData.itemsByName[name];
+        await this.bot.equip(item.id, 'hand');
+        await this.bot.placeBlock(this.bot.blockAt(position.offset(0, -1, 0)), { x: 0, y: 1, z: 0 });
+    }
+
+    async craftItem(name, count, tablePos = null) {
+        const item = this.mcData.itemsByName[name];
+        let table = tablePos ? this.bot.blockAt(tablePos) : null;
+        const recipe = this.bot.recipesFor(item.id, null, 1, table)[0];
+        await this.bot.craft(recipe, count, table);
+    }
+
+    async goToChest() {
+        if (!this.villageChestPosition) throw new Error("I don't know where the chest is.");
+        await this.bot.pathfinder.goto(new GoalNear(this.villageChestPosition.x, this.villageChestPosition.y, this.villageChestPosition.z, 2));
     }
 }
 

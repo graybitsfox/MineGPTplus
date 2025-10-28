@@ -9,12 +9,13 @@ const server = createMCServer({
   motd: 'AutoBot Test Server',
   'max-players': 10,
   logging: true,
-  'view-distance': 10, // Default is 10, let's try increasing it to see if it helps
+  'view-distance': 10,
   plugins: {}
 })
 
 server.on('listening', () => {
-  console.log(`Server listening on port ${server.socketServer.address().port}!`);
+  // This line was causing a crash, simplified it.
+  console.log(`Server is listening on port 25565.`);
 });
 
 server.on('login', (client) => {
