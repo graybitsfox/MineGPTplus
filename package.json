@@ -1,10 +1,17 @@
 {
+  "name": "minegpt-bot-civilization",
+  "version": "1.0.0",
+  "description": "A multi-bot simulation for Minecraft",
+  "main": "run_simulation.js",
+  "scripts": {
+    "start": "node run_simulation.js"
+  },
   "dependencies": {
     "flying-squid": "^1.11.0",
     "mineflayer": "^4.33.0",
     "mineflayer-auto-eat": "^5.0.3",
     "mineflayer-pathfinder": "^2.4.5",
-    "uuid": "^13.0.0",
+    "uuid": "^10.0.0",
     "ws": "^8.18.3"
   }
 }
