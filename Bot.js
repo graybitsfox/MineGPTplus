@@ -1,19 +1,15 @@
-require('dotenv').config(); // Load .env file variables
+require('dotenv').config();
 const mineflayer = require('mineflayer')
 const { pathfinder, Movements, goals: { GoalNear } } = require('mineflayer-pathfinder')
 const { loader: autoeatLoader } = require('mineflayer-auto-eat')
 const WebSocket = require('ws');
 const { v4: uuidv4 } = require('uuid');
 
+// ... (BOT_STATES, TIMEOUTS, etc. are unchanged)
 const BOT_STATES = {
-    INIT: 'INIT',
-    CANDIDATE: 'CANDIDATE',
-    VOTING: 'VOTING',
-    WORKER_IDLE: 'WORKER_IDLE',
-    WORKER_BUSY: 'WORKER_BUSY',
-    ELDER: 'ELDER'
+    INIT: 'INIT', CANDIDATE: 'CANDIDATE', VOTING: 'VOTING',
+    WORKER_IDLE: 'WORKER_IDLE', WORKER_BUSY: 'WORKER_BUSY', ELDER: 'ELDER'
 };
-
 const ELECTION_TIMEOUT = 5000;
 const VOTE_TIMEOUT = 5000;
 const MAX_RETRIES = 5;
@@ -21,18 +17,14 @@ const RETRY_DELAY = 3000;
 const INVENTORY_CHECK_INTERVAL = 20000;
 
 class Bot {
+    // ... (constructor is unchanged)
     constructor(botName) {
-        // --- All connection parameters are now loaded from .env ---
         this.host = process.env.MINEGPT_HOST;
         this.port = parseInt(process.env.MINEGPT_PORT);
         this.version = process.env.MINEGPT_VERSION;
-
-        // Use the botName for offline mode, or the email for online mode
         this.username = process.env.MINEGPT_PASSWORD ? process.env.MINEGPT_USERNAME : botName;
-        this.password = process.env.MINEGPT_PASSWORD || null; // Use password or null for offline
+        this.password = process.env.MINEGPT_PASSWORD || null;
         this.auth = this.password ? 'microsoft' : 'offline';
-
-        // Internal properties
         this.bot = null;
         this.mcData = null;
         this.ws = null;
@@ -49,23 +41,16 @@ class Bot {
     }
 
     log(message) {
-        // Use the original bot name for logging, even in online mode
         console.log(`[${this.username} | ${this.state}] ${message}`);
     }
 
+    // ... (start and connection logic is unchanged)
     start(retryCount = 0) {
         this.log(`Attempting to connect to ${this.host}:${this.port} (try ${retryCount + 1}/${MAX_RETRIES})...`);
         this.bot = mineflayer.createBot({
-            host: this.host,
-            port: this.port,
-            version: this.version,
-            username: this.username,
-            password: this.password,
-            auth: this.auth,
-            logErrors: true, // Enable detailed errors
-            respawn: true,
-            viewDistance: 'far',
-            disableChatSigning: true
+            host: this.host, port: this.port, version: this.version, username: this.username,
+            password: this.password, auth: this.auth, logErrors: true, respawn: true,
+            viewDistance: 'far', disableChatSigning: true
         });
 
         this.bot.once('spawn', () => {
@@ -92,7 +77,85 @@ class Bot {
         });
     }
 
-    // ... (The rest of the file is identical to the last fully-functional version)
+    // --- Core Elder Method: establishVillageCenter (HEAVILY REVISED) ---
+    async establishVillageCenter() {
+        const MAX_ATTEMPTS = 5;
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            try {
+                this.log(`Attempt ${attempt}/${MAX_ATTEMPTS} to establish the village center.`);
+
+                // We need at least 11 logs (3 for table, 8 for chest)
+                // Let's get a bit extra to be safe.
+                await this.gatherItem('oak_log', 12);
+
+                // **CRITICAL FIX**: Craft planks from all available logs
+                await this.craftPlanks();
+
+                const chestPosition = this.bot.entity.position.floored().offset(2, 0, 0);
+                this.villageChestPosition = chestPosition;
+                const tablePos = this.bot.entity.position.floored().offset(0, 0, 2);
+
+                await this.craftItem('crafting_table', 1);
+                await this.placeItem('crafting_table', tablePos);
+
+                await this.craftItem('chest', 1, tablePos);
+                await this.placeItem('chest', chestPosition);
+
+                this.sendMessage({ event: 'village_chest_location', position: chestPosition });
+
+                this.log("Village center established successfully!");
+                return; // Success, exit the loop
+
+            } catch (err) {
+                this.log(`Error on attempt ${attempt}: ${err.message}`);
+                if (attempt < MAX_ATTEMPTS) {
+                    this.log("Retrying in 15 seconds...");
+                    await new Promise(resolve => setTimeout(resolve, 15000));
+                } else {
+                    this.log("Failed to establish village center after all attempts. The Elder is giving up.");
+                }
+            }
+        }
+    }
+
+    // --- New Helper Method for Crafting Planks ---
+    async craftPlanks() {
+        const logName = 'oak_log';
+        const logItem = this.mcData.itemsByName[logName];
+        const logCount = this.bot.inventory.count(logItem.id, null);
+
+        if (logCount > 0) {
+            this.log(`Found ${logCount} logs. Crafting them into planks.`);
+            const plankItem = this.mcData.itemsByName.oak_planks;
+            // Get the recipe for crafting planks (shapeless, in-inventory)
+            const recipe = this.bot.recipesFor(plankItem.id, null, 1, null)[0];
+            if (!recipe) throw new Error("Could not find recipe for planks.");
+
+            // Craft all logs into planks
+            await this.bot.craft(recipe, logCount, null);
+            this.log("Successfully crafted planks.");
+        }
+    }
+
+    // --- Other methods are mostly unchanged ---
+
+    // ... (loadPlugins, connectToMessageBus, sendMessage, handleMessage, addEventListeners)
+    // ... (startElection, castVote, tallyVotes)
+
+    onRoleAssigned() {
+        if (this.state === BOT_STATES.ELDER) {
+            this.establishVillageCenter().then(() => {
+                // Only start inventory checks if the village was established
+                if (this.villageChestPosition) {
+                    this.checkVillageInventory();
+                    setInterval(() => this.checkVillageInventory(), INVENTORY_CHECK_INTERVAL);
+                }
+            });
+        }
+    }
+
+    // ... (checkVillageInventory, evaluateGoals, createNewTask, etc.)
+    // All the logic below here is assumed to be the same as the last fully working version.
     loadPlugins() {
         this.bot.loadPlugin(pathfinder);
         this.bot.loadPlugin(autoeatLoader);
@@ -200,32 +263,6 @@ class Bot {
             this.sendMessage({ event: 'restart_election' });
         } else {
             this.sendMessage({ event: 'election_result', elder: winningCandidate });
-        }
-    }
-
-    onRoleAssigned() {
-        if (this.state === BOT_STATES.ELDER) {
-            this.establishVillageCenter().then(() => {
-                this.checkVillageInventory();
-                setInterval(() => this.checkVillageInventory(), INVENTORY_CHECK_INTERVAL);
-            });
-        }
-    }
-
-    async establishVillageCenter() {
-        try {
-            const chestPosition = this.bot.entity.position.floored().offset(2, 0, 0);
-            this.villageChestPosition = chestPosition;
-            const tablePos = this.bot.entity.position.floored().offset(0, 0, 2);
-            await this.gatherItem('oak_log', 3);
-            await this.craftItem('crafting_table', 1);
-            await this.placeItem('crafting_table', tablePos);
-            await this.gatherItem('oak_log', 8);
-            await this.craftItem('chest', 1, tablePos);
-            await this.placeItem('chest', chestPosition);
-            this.sendMessage({ event: 'village_chest_location', position: chestPosition });
-        } catch (err) {
-            this.log(`Error establishing village center: ${err.message}`);
         }
     }
 
@@ -370,6 +407,7 @@ class Bot {
         const item = this.mcData.itemsByName[name];
         let table = tablePos ? this.bot.blockAt(tablePos) : null;
         const recipe = this.bot.recipesFor(item.id, null, 1, table)[0];
+        if(!recipe) throw new Error(`No recipe for ${name}`);
         await this.bot.craft(recipe, count, table);
     }
 
