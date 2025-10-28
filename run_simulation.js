@@ -1,29 +1,31 @@
 require('dotenv').config();
 const { spawn } = require('child_process');
 const path = require('path');
-const Bot = require('./Bot');
 
 const BOT_NAMES = ['Alice', 'Bob', 'Charlie', 'David'];
-// A short delay to let the message bus initialize
 const SERVER_STARTUP_TIME = 2000;
 
 let childProcesses = [];
 
 // Helper function to spawn and manage a child process
-function runScript(scriptPath, name) {
+function runScript(scriptPath, name, args = []) {
     const fullPath = path.join(__dirname, scriptPath);
-    const process = spawn('node', [fullPath]);
+    const process = spawn('node', [fullPath, ...args]);
+
+    // Use the 'name' for logging prefix
+    const logPrefix = `[${name}]`;
 
     process.stdout.on('data', (data) => {
-        console.log(`[${name} STDOUT]: ${data.toString().trim()}`);
+        // Log each line from the child process with the prefix
+        data.toString().trim().split('\n').forEach(line => console.log(`${logPrefix} ${line}`));
     });
 
     process.stderr.on('data', (data) => {
-        console.error(`[${name} STDERR]: ${data.toString().trim()}`);
+        data.toString().trim().split('\n').forEach(line => console.error(`${logPrefix} [ERROR] ${line}`));
     });
 
     process.on('close', (code) => {
-        console.log(`[${name}]: Child process exited with code ${code}`);
+        console.log(`${logPrefix} Child process exited with code ${code}`);
     });
 
     childProcesses.push(process);
@@ -34,25 +36,25 @@ function runScript(scriptPath, name) {
 console.log("--- Starting Message Bus Server ---");
 runScript('message_bus.js', 'MessageBus');
 
-// 2. Start the bots after a short delay
+// 2. Start the bot processes after a short delay
 console.log(`--- Waiting ${SERVER_STARTUP_TIME / 1000} seconds for the message bus to initialize ---`);
 setTimeout(() => {
-    console.log("--- Starting Bot Civilization ---");
+    console.log("--- Launching Bot Processes ---");
     console.log(`Connecting to server: ${process.env.MINEGPT_HOST}:${process.env.MINEGPT_PORT}`);
 
     BOT_NAMES.forEach((name, i) => {
+        // Stagger the bot process launches
         setTimeout(() => {
-            console.log(`Starting bot: ${name}`);
-            const bot = new Bot(name);
-            bot.start();
-        }, i * 4000); // Stagger bot startups to avoid overwhelming the server login
+            console.log(`--- Spawning process for bot: ${name} ---`);
+            runScript('start_bot.js', name, [name]); // Pass bot name as argument
+        }, i * 2000); // Stagger to avoid overwhelming the server login
     });
 }, SERVER_STARTUP_TIME);
 
 
 // Graceful shutdown
 function cleanup() {
-    console.log("\n--- Shutting down all processes ---");
+    console.log("\n--- Shutting down all child processes ---");
     childProcesses.forEach(proc => {
         proc.kill();
     });
