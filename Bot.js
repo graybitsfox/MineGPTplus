@@ -57,7 +57,6 @@ class Bot {
             this.loadPlugins();
             this.addEventListeners();
             this.connectToMessageBus();
-            this.startElection();
         });
 
         this.bot.on('error', (err) => {
@@ -84,7 +83,11 @@ class Bot {
 
     connectToMessageBus() {
         this.ws = new WebSocket('ws://localhost:8080');
-        this.ws.on('open', () => this.log("Connected to Message Bus."));
+        this.ws.on('open', () => {
+            this.log("Connected to Message Bus.");
+            // Now that we are connected to the bus, we can safely start the election
+            this.startElection();
+        });
         this.ws.on('message', message => this.handleMessage(JSON.parse(message.toString())));
         this.ws.on('close', () => setTimeout(() => this.connectToMessageBus(), 5000));
         this.ws.on('error', () => {});
@@ -138,6 +141,24 @@ class Bot {
 
     addEventListeners() {
         this.bot.on('kicked', (reason) => this.log(`Kicked for ${reason}!`));
+        this.startSelfDefense();
+    }
+
+    startSelfDefense() {
+        this.bot.on('entityHurt', (entity) => {
+            if (entity.id !== this.bot.entity.id) return; // Only react if this bot was hurt
+
+            const attacker = this.bot.nearestEntity(e =>
+                e.type === 'mob' &&
+                e.kind === 'Hostile mobs' &&
+                e.position.distanceTo(this.bot.entity.position) < 8
+            );
+
+            if (attacker) {
+                this.log(`Under attack by a ${attacker.name}! Fighting back.`);
+                this.bot.attack(attacker);
+            }
+        });
     }
 
     startElection() {
