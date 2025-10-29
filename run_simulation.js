@@ -12,11 +12,9 @@ function runScript(scriptPath, name, args = []) {
     const fullPath = path.join(__dirname, scriptPath);
     const process = spawn('node', [fullPath, ...args]);
 
-    // Use the 'name' for logging prefix
     const logPrefix = `[${name}]`;
 
     process.stdout.on('data', (data) => {
-        // Log each line from the child process with the prefix
         data.toString().trim().split('\n').forEach(line => console.log(`${logPrefix} ${line}`));
     });
 
@@ -43,11 +41,10 @@ setTimeout(() => {
     console.log(`Connecting to server: ${process.env.MINEGPT_HOST}:${process.env.MINEGPT_PORT}`);
 
     BOT_NAMES.forEach((name, i) => {
-        // Stagger the bot process launches
         setTimeout(() => {
             console.log(`--- Spawning process for bot: ${name} ---`);
-            runScript('start_bot.js', name, [name]); // Pass bot name as argument
-        }, i * 2000); // Stagger to avoid overwhelming the server login
+            runScript('start_bot.js', name, [name]);
+        }, i * 2000);
     });
 }, SERVER_STARTUP_TIME);
 
