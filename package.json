@@ -7,6 +7,7 @@
     "start": "node run_simulation.js"
   },
   "dependencies": {
+    "dotenv": "^16.4.5",
     "mineflayer": "^4.33.0",
     "mineflayer-auto-eat": "^5.0.3",
     "mineflayer-pathfinder": "^2.4.5",
